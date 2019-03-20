@@ -1,9 +1,16 @@
 #include <assert.h>
 #include <sys/types.h>
-
+#include <ucontext.h>
+#include <stdlib.h>
 #include "kfc.h"
 
 static int inited = 0;
+static tid_t current;
+struct conID{
+	ucontext_t cont;
+	int full;
+};
+static struct conID cons[KFC_MAX_THREADS];
 
 /**
  * Initializes the kfc library.  Programs are required to call this function
@@ -19,7 +26,8 @@ int
 kfc_init(int kthreads, int quantum_us)
 {
 	assert(!inited);
-
+	cons[0].full = 1;
+	current = 0;
 	inited = 1;
 	return 0;
 }
@@ -65,7 +73,27 @@ kfc_create(tid_t *ptid, void *(*start_func)(void *), void *arg,
 		caddr_t stack_base, size_t stack_size)
 {
 	assert(inited);
-
+	ucontext_t newCon;
+	ucontext_t swapCon;
+	getcontext(&newCon);
+	if(stack_base == NULL){
+		if(stack_size == 0) stack_size = KFC_DEF_STACK_SIZE;
+		stack_base = malloc(stack_size);
+	}
+	
+	newCon.uc_stack.ss_sp = stack_base;
+	newCon.uc_stack.ss_size = stack_size;
+	newCon.uc_link = &swapCon;
+	makecontext(&newCon, (void (*)())start_func, 1, arg);
+	int i = 0;
+	for(; cons[i].full == 1; i++);
+	cons[i].cont = newCon;
+	cons[i].full = 1;
+	*ptid = i;
+	int temp = current;
+	current = i;
+	swapcontext(&swapCon, &newCon);
+	current = temp;
 	return 0;
 }
 
@@ -92,8 +120,7 @@ tid_t
 kfc_self(void)
 {
 	assert(inited);
-
-	return 0;
+	return current;
 }
 
 /**
