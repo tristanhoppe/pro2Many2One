@@ -3,14 +3,47 @@
 #include <ucontext.h>
 #include <stdlib.h>
 #include "kfc.h"
-
+#include "queue.h"
+#include "valgrind.h"
+static tid_t blocker;
+static tid_t bFor;
+static queue_t conQ;
 static int inited = 0;
 static tid_t current;
+static ucontext_t switchCon;
 struct conID{
 	ucontext_t cont;
 	int full;
+	int ID;
+	void *retVal;
+	int running;
+	tid_t bFor;
 };
 static struct conID cons[KFC_MAX_THREADS];
+
+/**
+ *
+ *
+ *
+ */
+void
+context_switch(){
+struct conID *parent;
+parent = &cons[current];
+	
+
+struct conID *temp;
+temp = queue_dequeue(&conQ);
+current = temp->ID;
+cons[current].running = 1;
+swapcontext(&parent->cont, &temp->cont);
+}
+
+void
+my_func(void *(*start_func)(void *), void *arg){
+kfc_exit(start_func(arg));
+}
+
 
 /**
  * Initializes the kfc library.  Programs are required to call this function
@@ -25,13 +58,31 @@ static struct conID cons[KFC_MAX_THREADS];
 int
 kfc_init(int kthreads, int quantum_us)
 {
+	
 	assert(!inited);
+	size_t switchstack_size = KFC_DEF_STACK_SIZE;
+	caddr_t switchstack = malloc(switchstack_size);
+	VALGRIND_STACK_REGISTER(switchstack, switchstack + switchstack_size);
+
+
+
+
+
+
+	getcontext(&switchCon);
+	switchCon.uc_stack.ss_sp = switchstack;
+	switchCon.uc_stack.ss_size = switchstack_size;
+	makecontext(&switchCon, context_switch, 0);
+
+	queue_init(&conQ);
 	cons[0].full = 1;
+	cons[0].ID = 0;
+	cons[0].running = 1;
+	cons[0].bFor = -1;
 	current = 0;
 	inited = 1;
 	return 0;
 }
-
 /**
  * Cleans up any resources which were allocated by kfc_init.  You may assume
  * that this function is called only from the main thread, that any other
@@ -74,26 +125,40 @@ kfc_create(tid_t *ptid, void *(*start_func)(void *), void *arg,
 {
 	assert(inited);
 	ucontext_t newCon;
-	ucontext_t swapCon;
+	//ucontext_t swapCon;
 	getcontext(&newCon);
 	if(stack_base == NULL){
 		if(stack_size == 0) stack_size = KFC_DEF_STACK_SIZE;
 		stack_base = malloc(stack_size);
+		VALGRIND_STACK_REGISTER(stack_base, stack_base + stack_size);
 	}
 	
 	newCon.uc_stack.ss_sp = stack_base;
 	newCon.uc_stack.ss_size = stack_size;
-	newCon.uc_link = &swapCon;
-	makecontext(&newCon, (void (*)())start_func, 1, arg);
+	newCon.uc_link = &switchCon;
 	int i = 0;
-	for(; cons[i].full == 1; i++);
+	for(; i < KFC_MAX_THREADS; i++){
+		if(cons[i].full == 0) break;
+	}
 	cons[i].cont = newCon;
+	cons[i].ID = i;
 	cons[i].full = 1;
+	cons[i].running = 1;
+	cons[i].bFor = -1;
 	*ptid = i;
-	int temp = current;
-	current = i;
-	swapcontext(&swapCon, &newCon);
-	current = temp;
+
+
+	makecontext(&cons[i].cont, (void (*)())my_func, 2, (void (*)())start_func, arg);
+
+	//struct conID *parent;
+	//parent = &cons[current];
+	
+//	queue_enqueue(&conQ, parent);
+//	current = i;
+//	DPRINTF("got here");
+	queue_enqueue(&conQ, &cons[i]);
+//	swapcontext(&parent->cont, &switchCon);
+	
 	return 0;
 }
 
@@ -101,13 +166,34 @@ void
 kfc_exit(void *ret)
 {
 	assert(inited);
+	cons[current].retVal = ret;
+	cons[current].running = 0;
+	for(int i = 0; i < KFC_MAX_THREADS; i++){
+		if(cons[i].bFor == current){
+		queue_enqueue(&conQ, &cons[blocker]);
+		cons[i].bFor = -1;
+		break;
+		}
+	}
+	//struct conID *temp;
+	//temp = queue_dequeue(&conQ);
+	//current = temp->ID;
+	//setcontext(&temp->cont);
+	context_switch();
 }
 
 int
 kfc_join(tid_t tid, void **pret)
 {
 	assert(inited);
-
+//	DPRINTF("Thread %d: is trying to join on %d which is in state %d\n",current,tid,cons[tid].running);
+	if(cons[tid].running == 1){
+		cons[current].bFor = tid;
+		context_switch();
+	}
+//	DPRINTF("Thread is returning %d\n", cons[tid].retVal);
+	free(cons[tid].cont.uc_stack.ss_sp);
+	*pret = cons[tid].retVal;
 	return 0;
 }
 
@@ -132,26 +218,46 @@ void
 kfc_yield(void)
 {
 	assert(inited);
+	struct conID *hold;
+	hold = &cons[current]; 
+	
+	struct conID *temper;
+	queue_enqueue(&conQ, hold);
+	temper = queue_dequeue(&conQ);
+	current = temper->ID;
+	swapcontext(&hold->cont, &temper->cont);
 }
+
 
 int
 kfc_sem_init(kfc_sem_t *sem, int value)
 {
 	assert(inited);
+	sem->val = value;
 	return 0;
 }
-
+//release
 int
 kfc_sem_post(kfc_sem_t *sem)
 {
 	assert(inited);
+	//sem->val++;
+	if(sem->val <= 0){
+		queue_enqueue(&conQ, &cons[sem->blocker]);
+		//wakeup(p)
+	}
 	return 0;
 }
-
+//aquire
 int
 kfc_sem_wait(kfc_sem_t *sem)
 {
 	assert(inited);
+	sem->val--;
+	if(sem->val < 0){
+		sem->blocker = current;
+		context_switch();
+	}
 	return 0;
 }
 

@@ -18,7 +18,8 @@
 typedef unsigned int tid_t;
 
 typedef struct {
-	// Put fields for semaphore here
+	int val;
+	tid_t blocker;
 } kfc_sem_t;
 
 /**************************
@@ -33,7 +34,7 @@ void kfc_exit(void *ret);
 int kfc_join(tid_t tid, void **pret);
 tid_t kfc_self(void);
 void kfc_yield(void);
-
+void context_switch();
 int kfc_sem_init(kfc_sem_t *sem, int value);
 int kfc_sem_post(kfc_sem_t *sem);
 int kfc_sem_wait(kfc_sem_t *sem);
