@@ -5,12 +5,14 @@
 #include "kfc.h"
 #include "queue.h"
 #include "valgrind.h"
+#include "kthread.h"
 static tid_t blocker;
-static tid_t bFor;
 static queue_t conQ;
 static int inited = 0;
 static tid_t current;
 static ucontext_t switchCon;
+static kthread_t kList[MAX_KTHREADS];
+static kthread_mutex_t qlock;
 struct conID{
 	ucontext_t cont;
 	int full;
@@ -28,23 +30,44 @@ static struct conID cons[KFC_MAX_THREADS];
  */
 void
 context_switch(){
-struct conID *parent;
-parent = &cons[current];
-	
-
-struct conID *temp;
-temp = queue_dequeue(&conQ);
-current = temp->ID;
-cons[current].running = 1;
-swapcontext(&parent->cont, &temp->cont);
+	struct conID *parent;
+	parent = &cons[current];
+	struct conID *temp;
+	temp = queue_dequeue(&conQ);
+	current = temp->ID;
+	cons[current].running = 1;
+	swapcontext(&parent->cont, &temp->cont);
 }
 
 void
 my_func(void *(*start_func)(void *), void *arg){
-kfc_exit(start_func(arg));
+	kfc_exit(start_func(arg));
 }
-
-
+/*
+void
+kthread_main(){
+	tid_t kcur = -1;
+	struct conID *ktemp;
+	struct conID *kparent;
+	while(queue_peek(&conQ) == NULL);
+	kthread_mutex_lock(&qlock);	
+	ktemp = queue_dequeue(&conQ);
+	kthread_mutex_lock(&qlock);
+	kcur = ktemp->ID;
+	setcontext(&cons[kcur].cont);
+	while(inited == 1){
+		if(cons[kcur].running == 0){
+			kparent = &cons[kcur];
+			kthread_mutex_lock(&qlock);	
+			ktemp = queue_dequeue(&conQ);
+			kthread_mutex_lock(&qlock);
+			kcur = ktemp->ID;
+			cons[kcur].running = 1;
+			swapcontext(&kparent->cont, &ktemp->cont);
+		}
+	}
+}
+*/
 /**
  * Initializes the kfc library.  Programs are required to call this function
  * before they may use anything else in the library's public interface.
@@ -60,6 +83,7 @@ kfc_init(int kthreads, int quantum_us)
 {
 	
 	assert(!inited);
+	kthread_mutex_init(&qlock);	
 	size_t switchstack_size = KFC_DEF_STACK_SIZE;
 	caddr_t switchstack = malloc(switchstack_size);
 	VALGRIND_STACK_REGISTER(switchstack, switchstack + switchstack_size);
@@ -80,7 +104,11 @@ kfc_init(int kthreads, int quantum_us)
 	cons[0].running = 1;
 	cons[0].bFor = -1;
 	current = 0;
+	
 	inited = 1;
+	//for(int i = 0; i < kthreads; i++){
+	//	kthread_create(&kList[i], (void * (*)(void *))kthread_main, NULL);
+	//}
 	return 0;
 }
 /**
@@ -98,7 +126,9 @@ void
 kfc_teardown(void)
 {
 	assert(inited);
+	free(cons[0].cont.uc_stack.ss_sp);
 
+	free(switchCon.uc_stack.ss_sp);
 	inited = 0;
 }
 
@@ -234,6 +264,7 @@ kfc_sem_init(kfc_sem_t *sem, int value)
 {
 	assert(inited);
 	sem->val = value;
+	queue_init(&sem->blocker);
 	return 0;
 }
 //release
@@ -241,9 +272,11 @@ int
 kfc_sem_post(kfc_sem_t *sem)
 {
 	assert(inited);
-	//sem->val++;
+	sem->val++;
 	if(sem->val <= 0){
-		queue_enqueue(&conQ, &cons[sem->blocker]);
+		struct conID *temper;
+		temper = queue_dequeue(&(sem->blocker));
+		queue_enqueue(&conQ, &cons[temper->ID]);
 		//wakeup(p)
 	}
 	return 0;
@@ -255,7 +288,7 @@ kfc_sem_wait(kfc_sem_t *sem)
 	assert(inited);
 	sem->val--;
 	if(sem->val < 0){
-		sem->blocker = current;
+		queue_enqueue(&sem->blocker, &cons[current]);
 		context_switch();
 	}
 	return 0;

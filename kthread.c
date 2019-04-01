@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -17,6 +16,8 @@ struct kthread_info {
 
 static struct kthread_info kthreads[MAX_KTHREADS];
 static pthread_mutex_t kthreads_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int inited;
 
 static struct kthread_info *
 tidmap_find_tid(kthread_t tid)
@@ -73,7 +74,6 @@ kthread_trampoline(void *arg)
 	}
 
 	*args->ptid = id;
-	pthread_detach(pthread_self());
 
 	sem_post(&args->sem);
 	return start(start_arg);
@@ -82,6 +82,11 @@ kthread_trampoline(void *arg)
 int
 kthread_create(kthread_t *ptid, void *(*start)(void *), void *arg)
 {
+	if (!inited) {
+		tidmap_add_self();
+		inited = 1;
+	}
+
 	struct trampoline_args args;
 	sem_init(&args.sem, 0, 0);
 	args.start = start;
@@ -97,6 +102,7 @@ kthread_create(kthread_t *ptid, void *(*start)(void *), void *arg)
 	}
 
 	sem_wait(&args.sem);
+	sem_destroy(&args.sem);
 	if (args.error) {
 		errno = args.error;
 		return -1;
@@ -118,6 +124,7 @@ kthread_join(kthread_t tid, void **pret) {
 	struct kthread_info *entry = tidmap_find_tid(tid);
 	if (!entry) {
 		errno = ESRCH;
+		pthread_mutex_unlock(&kthreads_lock);
 		return -1;
 	}
 	pthread_mutex_unlock(&kthreads_lock);

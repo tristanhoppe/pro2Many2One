@@ -3,7 +3,7 @@
 
 #include <stdio.h>
 #include <sys/types.h>
-
+#include "queue.h"
 #define DPRINTF(...) do { fprintf(stderr, __VA_ARGS__); } while (0)
 
 #define KFC_MAX_THREADS 1024
@@ -19,7 +19,7 @@ typedef unsigned int tid_t;
 
 typedef struct {
 	int val;
-	tid_t blocker;
+	queue_t blocker;
 } kfc_sem_t;
 
 /**************************
